@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 
 import numpy as np
 
-from local_app import vanish_cam as app
+import vanish_cam as app
 
 
 def arguments(**overrides):
@@ -20,6 +20,23 @@ def arguments(**overrides):
 
 
 class VirtualCameraTests(unittest.TestCase):
+    def test_macos_missing_obs_has_actionable_guidance(self):
+        module = SimpleNamespace(Camera=Mock(side_effect=RuntimeError("driver missing")),
+                                 PixelFormat=SimpleNamespace(BGR="BGR"))
+        with patch.dict("sys.modules", pyvirtualcam=module), \
+                patch.object(app.platform, "system", return_value="Darwin"), \
+                patch("builtins.print"):
+            self.assertIsNone(app.open_virtual_camera(arguments(), 640, 480))
+            with self.assertRaisesRegex(RuntimeError, "OBS Studio 30.*--no-virtual-camera"):
+                app.open_virtual_camera(arguments(virtual_camera=True), 640, 480)
+
+    def test_missing_pyvirtualcam_is_optional_unless_requested(self):
+        with patch.dict("sys.modules", pyvirtualcam=None), patch("builtins.print"):
+            self.assertIsNone(app.open_virtual_camera(arguments(), 640, 480))
+            self.assertIsNone(app.open_virtual_camera(arguments(virtual_camera=False), 640, 480))
+            with self.assertRaisesRegex(RuntimeError, "pyvirtualcam"):
+                app.open_virtual_camera(arguments(virtual_camera=True), 640, 480)
+
     def test_bgr_format_and_actual_frame_dimensions(self):
         camera = Mock(device="OBS Virtual Camera")
         module = SimpleNamespace(Camera=Mock(return_value=camera), PixelFormat=SimpleNamespace(BGR="BGR"))
@@ -59,6 +76,58 @@ class VirtualCameraTests(unittest.TestCase):
         sent = camera.send.call_args.args[0]
         self.assertEqual(sent.shape, (24, 40, 3))
         self.assertTrue((sent == 42).all())
+
+
+class CameraPlatformTests(unittest.TestCase):
+    def test_platform_backend_selection(self):
+        for system, backend in (("Darwin", app.cv2.CAP_AVFOUNDATION),
+                                ("Windows", app.cv2.CAP_DSHOW), ("Linux", None)):
+            with self.subTest(system=system):
+                capture = Mock()
+                with patch.object(app.platform, "system", return_value=system), \
+                        patch.object(app.cv2, "VideoCapture", return_value=capture) as opening:
+                    self.assertIs(app.open_camera(1, 640, 480), capture)
+                opening.assert_called_once_with(*((1,) if backend is None else (1, backend)))
+                capture.set.assert_any_call(app.cv2.CAP_PROP_FRAME_WIDTH, 640)
+                capture.set.assert_any_call(app.cv2.CAP_PROP_FRAME_HEIGHT, 480)
+
+    def test_native_backend_failure_releases_and_falls_back(self):
+        for system in ("Darwin", "Windows"):
+            with self.subTest(system=system):
+                native, fallback = Mock(), Mock()
+                native.isOpened.return_value = False
+                with patch.object(app.platform, "system", return_value=system), \
+                        patch.object(app.cv2, "VideoCapture", side_effect=[native, fallback]) as opening:
+                    self.assertIs(app.open_camera(0, 640, 480), fallback)
+                self.assertEqual(opening.call_args_list[-1].args, (0,))
+                native.release.assert_called_once()
+                fallback.release.assert_not_called()
+
+    def test_macos_camera_failure_releases_devices_and_explains_permissions(self):
+        native, fallback = Mock(), Mock()
+        native.isOpened.return_value = fallback.isOpened.return_value = False
+        with patch.object(app.platform, "system", return_value="Darwin"), \
+                patch.object(app.cv2, "VideoCapture", side_effect=[native, fallback]):
+            with self.assertRaisesRegex(RuntimeError, "Privacy e sicurezza > Fotocamera"):
+                app.open_camera(0, 640, 480)
+        native.release.assert_called_once()
+        fallback.release.assert_called_once()
+
+    def test_macos_menu_ignores_unsupported_visibility_property(self):
+        with ExitStack() as mocks:
+            mocks.enter_context(patch.object(app.platform, "system", return_value="Darwin"))
+            for name in ("namedWindow", "setMouseCallback", "imshow", "destroyWindow"):
+                mocks.enter_context(patch.object(app.cv2, name))
+            mocks.enter_context(patch.object(app.cv2, "waitKey", side_effect=[0, ord("2")]))
+            visibility = mocks.enter_context(patch.object(app.cv2, "getWindowProperty"))
+            self.assertEqual(app.choose_mode(), "naruto")
+            visibility.assert_not_called()
+
+    def test_launcher_virtual_flag_overrides_local_default(self):
+        with patch("sys.argv", ["vanish_cam.py", "--no-virtual-camera", "--virtual-camera"]):
+            self.assertTrue(app.parse_args().virtual_camera)
+        with patch("sys.argv", ["vanish_cam.py", "--no-virtual-camera"]):
+            self.assertFalse(app.parse_args().virtual_camera)
 
 
 class VideoLoopTests(unittest.TestCase):

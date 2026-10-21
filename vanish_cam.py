@@ -148,7 +148,8 @@ def choose_mode() -> str | None:
                 selected[0] = "naruto"
             elif key in (ord("q"), 27):
                 return None
-            if cv2.getWindowProperty(title, cv2.WND_PROP_VISIBLE) < 1:
+            # Cocoa does not implement WND_PROP_VISIBLE; use Q/ESC on macOS.
+            if platform.system() != "Darwin" and cv2.getWindowProperty(title, cv2.WND_PROP_VISIBLE) < 1:
                 return None
         return selected[0]
     finally:
@@ -167,11 +168,25 @@ def open_virtual_camera(args: argparse.Namespace, width: int, height: int):
             backend=args.virtual_backend, device=args.virtual_device,
         )
     except (ImportError, RuntimeError, OSError, ValueError) as error:
+        system = platform.system()
+        if system == "Darwin":
+            guidance = (
+                "Su macOS 13+ installa OBS Studio 30+ per Apple Silicon. "
+                "Apri OBS, avvia e ferma una volta la fotocamera virtuale, "
+                "autorizza l'estensione nelle Impostazioni di Sistema e chiudi OBS. "
+                "Unity Capture non e' supportato su macOS. "
+            )
+        elif system == "Windows":
+            guidance = (
+                "Installa OBS Studio (con il driver OBS Virtual Camera) oppure "
+                "Unity Capture. Ferma la fotocamera virtuale in OBS. "
+            )
+        else:
+            guidance = "Installa e configura il dispositivo v4l2loopback. "
         message = (
-            "Webcam virtuale non disponibile. Installa OBS Studio (con il driver "
-            "OBS Virtual Camera) oppure Unity Capture. Se usi OBS Virtual Camera, "
-            "ferma 'Avvia fotocamera virtuale' in OBS. "
-            "Avvia da AVVIA_LOCALE.bat per installare pyvirtualcam. "
+            "Webcam virtuale non disponibile. " + guidance
+            + "Installa pyvirtualcam dall'ambiente Python dell'app, oppure usa "
+            "--no-virtual-camera per la sola anteprima (senza OBS). "
             f"Dettaglio: {error}"
         )
         if args.virtual_camera is True or args.virtual_backend or args.virtual_device:
@@ -223,8 +238,10 @@ def download_models(mode: str = "normal") -> None:
 
 
 def open_camera(index: int, width: int, height: int) -> cv2.VideoCapture:
-    if platform.system() == "Windows":
-        capture = cv2.VideoCapture(index, cv2.CAP_DSHOW)
+    system = platform.system()
+    if system in ("Windows", "Darwin"):
+        backend = cv2.CAP_DSHOW if system == "Windows" else cv2.CAP_AVFOUNDATION
+        capture = cv2.VideoCapture(index, backend)
         if not capture.isOpened():
             capture.release()
             capture = cv2.VideoCapture(index)
@@ -232,8 +249,16 @@ def open_camera(index: int, width: int, height: int) -> cv2.VideoCapture:
         capture = cv2.VideoCapture(index)
 
     if not capture.isOpened():
+        capture.release()
+        permissions = (
+            " Su macOS autorizza Terminale (o l'app che avvia Python) in "
+            "Impostazioni di Sistema > Privacy e sicurezza > Fotocamera, "
+            "poi riavvia l'app."
+            if system == "Darwin" else ""
+        )
         raise RuntimeError(
             f"Webcam {index} non disponibile. Chiudi le altre app oppure prova --camera 1."
+            + permissions
         )
 
     capture.set(cv2.CAP_PROP_FRAME_WIDTH, width)
